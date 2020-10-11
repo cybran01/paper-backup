@@ -1,12 +1,77 @@
 from argparse import ArgumentParser
+from io import BytesIO
+from logging import error
+from pyx.canvas import canvas
+from pyx.document import document,page,paperformat
+from pyx.bitmap import bitmap
 
 from pyzbar.pyzbar import decode as _QRdecode
 from pyzbar.wrapper import ZBarSymbol
 from qrcode import make as QRencode
+from qrcode import QRCode, exceptions
 
-from base64 import b64encode,b64decode
-from PIL import Image
+from base64 import b85encode, b85decode
+from PIL import Image,UnidentifiedImageError
 from gzip import compress,decompress
+from pathlib import Path
+import os 
+import tarfile
+
+#Determine max. bytes to fit in qrcode
+def maxSplit(data: str):
+    def dataFits(_data: str):
+        qr = QRCode()
+        qr.add_data(_data)
+        try:
+            qr.best_fit()
+            return True
+        except exceptions.DataOverflowError:
+            return False
+
+    if dataFits(data):
+        return [data, None]
+
+    iteration = [0,len(data)]
+    while iteration[1]-iteration[0] > 1:
+        if dataFits(data[: int((iteration[1]+iteration[0])/2)]):
+            iteration[0] = int((iteration[1]+iteration[0])/2)
+        else:
+            iteration[1] = int((iteration[1]+iteration[0])/2)
+
+    return data[:iteration[0]], data[iteration[0]:]
+
+def getChunkData(data: str):
+    def findHeaderEnd(_data: str):
+        try:
+            regularChunkData = _data.index(">")
+        except ValueError:
+            return True,_data.index("<")
+        try:
+            endChunkData = _data.index("<")
+        except ValueError:
+            return False,regularChunkData
+
+        return (endChunkData < regularChunkData), min(regularChunkData,endChunkData)
+        
+    isEndChunk, headerEndIndex = findHeaderEnd(data)
+    chunkIndex = int(data[:headerEndIndex])
+    chunkData = data[headerEndIndex+1:]
+
+    return isEndChunk, chunkIndex, chunkData
+
+def pdfImagePlacement(counter: int):
+    #All units in centimeters
+    qrSize = args.qrSize/10.0
+    A4Width = 21.0
+    A4Height = 29.7
+    horizontalPadding = (A4Width-2*qrSize)/5.0
+    horizontalMargin = 2*horizontalPadding
+    verticalPadding = (A4Height-3*qrSize)/6.0
+    verticalMargin = 2*verticalPadding
+
+    return dict(xpos = horizontalMargin + (counter%2)*(horizontalPadding+qrSize),
+        ypos = A4Height-(verticalMargin+qrSize + (int(counter/2)%3)*(verticalPadding+qrSize)),
+        width = qrSize)
 
 def QRdecode(file: str):
     decodedChunkBuffer = []
@@ -16,60 +81,142 @@ def QRdecode(file: str):
     
     return decodedChunkBuffer
 
-def main():
-    chunksize = args.chunksize
+def backup():
+    inFolder = Path(args.input)
 
-    f = open(args.infilename,"rb")
-    content = f.read()
-    f.close()
+    memTar = BytesIO()
+    tar = tarfile.open(fileobj = memTar, mode = "x")
+    for itm in inFolder.iterdir():
+        tar.add(itm.resolve(), arcname=itm.relative_to(inFolder))
+
+    tar.close()
+
+    content = memTar.getvalue()
+    memTar.close()
 
     content = compress(content)
-    b64Content = b64encode(content)
+    b85Content = b85encode(content).decode("UTF-8")
 
-    b64contentSplit = [b64Content[i:i+chunksize] for i in range(0,len(b64Content),chunksize)]
+    pdf = document()
+    pdfPage = None
 
-    #TODO instead use pillow to create PDF
-    for nr,chunk in enumerate(b64contentSplit):
-        QRencode(str(nr) + "/" + str(len(b64contentSplit)) + ">" + chunk.decode("UTF-8")).save(str(nr) + ".bmp")
+    counter = 0
+    while b85Content:
+        b85Content =  str(counter) + ">" + b85Content
+        chunk, b85Content = maxSplit(b85Content)
+        if b85Content is None:
+            chunk = chunk[:chunk.index(">")] + "<" + chunk[chunk.index(">")+1:] #Signal last chunk
 
-    b64contentRestored = ""
-    b64chunkBuffer = []
-    totalChunks = 0
+        qrCode = QRencode(chunk)
 
-    for nr in range(len(b64contentSplit)):
-        print("Decoding " + str(nr) + " of " + str(len(b64contentSplit)-1) + "...")
-        for decodedQRChunk in QRdecode(str(nr) + ".bmp"):
-            decodedQRChunk = decodedQRChunk.decode("UTF-8")        
-            chunkIndex = int(decodedQRChunk[:decodedQRChunk.index("/")])
-            totalChunks = int(decodedQRChunk[decodedQRChunk.index("/")+1:decodedQRChunk.index(">")])
-            b64chunkData = decodedQRChunk[decodedQRChunk.index(">")+1:]
-            b64chunkBuffer.append((chunkIndex,b64chunkData))
-    #TODO: check if enough codes were scanned, etc.
+        #Only used for debugging
+        f = open(str(counter) + ".chunk","w")
+        f.write(chunk)
+        f.close
 
-    b64chunkBuffer.sort(key = lambda x: x[0])
+        if counter%6 == 0:
+            pdfPage = page(canvas(), paperformat = paperformat.A4,centered=0)
+            pdf.append(pdfPage)
 
-    for _, b64chunkData in b64chunkBuffer:
-        b64contentRestored += b64chunkData
+        pdfPage.canvas.insert(bitmap(**pdfImagePlacement(counter), image = qrCode.convert("LA")))
 
-    restored = b64decode(b64contentRestored)
+        #Currently only used for debugging
+        qrCode.save(str(counter) + ".bmp")
+
+        counter += 1
+
+    outFile = Path(args.output)
+    if(outFile.suffix == ".pdf"):
+        pdf.writePDFfile(args.output)
+    else: 
+        pdf.writePDFfile(args.output + ".pdf")
+    
+def restore():
+    b85ContentRestored = ""
+    b85ChunkBuffer = []
+    endChunkIndex = -1
+    
+    allImgs = []
+    for root, _, files in os.walk(args.input):
+	    for name in files:
+                curFile = os.path.join(root, name)
+                try:
+                    Image.open(curFile)
+                    allImgs.append(curFile)
+                except UnidentifiedImageError:
+                    curFileSuffix = Path(curFile).suffix
+                    if curFileSuffix == ".chunk":
+                        f = open(curFile, "r")
+                        isEndChunk, chunkIndex, b85chunkData = getChunkData(f.read())
+                        f.close()
+                        print("Found a chunk file containing chunk " + str(chunkIndex) + ", extracting...")
+                        b85ChunkBuffer.append((chunkIndex,b85chunkData))
+                        if isEndChunk:
+                            endChunkIndex = chunkIndex
+
+    for nr,file in enumerate(allImgs):
+        print("Decoding " + str(nr+1) + " of " + str(len(allImgs)) + " images...")
+        for decodedQRChunk in QRdecode(file):
+            decodedQRChunk = decodedQRChunk.decode("UTF-8")
+            isEndChunk, chunkIndex, b85chunkData = getChunkData(decodedQRChunk)
+            b85ChunkBuffer.append((chunkIndex,b85chunkData))
+            if isEndChunk:
+                endChunkIndex = chunkIndex
+
+    #Check if an endchunk was found
+    if endChunkIndex == -1:
+        error("The end chunk is missing. Shutting down")
+        exit()
+    else:
+        print("Found a total of " + str(endChunkIndex+1) + " chunks")
+
+    b85ChunkBuffer.sort(key = lambda x: x[0])
+    
+    #Check if b85ChunkBuffer makes sense
+    lastindex = -1
+    for index, b85chunkData in b85ChunkBuffer:
+        if (index > lastindex + 1):
+            error("Chunk " + str(lastindex + 1) + " is missing. Shutting down")
+            exit()
+        if (index < lastindex + 1):
+            error("Chunk " + str(index) + " is a duplicate. Shutting down")
+            exit()
+        lastindex = index
+        b85ContentRestored += b85chunkData
+
+    restored = b85decode(b85ContentRestored)
     restored = decompress(restored)
 
-    g = open(args.outfilename,"wb")
-    g.write(restored)
-    g.close() 
+    memTar = BytesIO(restored)
+    tar = tarfile.open(fileobj = memTar, mode="r")
+    tar.extractall(args.output)
+    tar.close()
+    memTar.close()
+
+def main():
+    if (args.mode == "backup"):
+        backup()
+    else:
+        restore()
+    
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument("-i", "--infile", dest="infilename") #TODO allow user to give a list of files
-    parser.add_argument("-o", "--outfile", dest="outfilename")
-    parser.add_argument("-c", "--chunksize", dest="chunksize", type=int, default=2048)
+    modeGroup = parser.add_mutually_exclusive_group()
+    modeGroup.required = True
+    modeGroup.add_argument("--backup", action="store_const", dest="mode", const="backup")
+    modeGroup.add_argument("--restore",action="store_const", dest="mode", const="restore")
+
+    parser.add_argument("-i", dest="input", required=True)
+    parser.add_argument("-o", dest="output", required=True)
+    parser.add_argument("-q", dest="qrSize", type=int)
+
     args = parser.parse_args()
 
-    if not args.infilename:
-        parser.error("Error, no input file given. Use -i to specify input file.")
-        exit()
-    if not args.outfilename:
-        parser.error("Error, no output file given. Use -o to specify output file.")
-        exit()
+    if args.qrSize is not None and args.mode == "restore":
+        parser.error("Argument -q in restore mode given, will be ignored")
+
+    if not args.qrSize:
+        args.qrSize = 80
 
     main()
