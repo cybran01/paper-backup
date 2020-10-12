@@ -107,12 +107,14 @@ def backup():
         if b85Content is None:
             chunk = chunk[:chunk.index(">")] + "<" + chunk[chunk.index(">")+1:] #Signal last chunk
 
+        print("Generating QRCode for chunk " + str(counter))
         qrCode = QRencode(chunk)
 
-        #Only used for debugging
-        f = open(str(counter) + ".chunk","w")
-        f.write(chunk)
-        f.close
+        #Used for debugging
+        if args.plainChunk:
+            f = open("chunk" + str(counter) + ".chunk","w")
+            f.write(chunk)
+            f.close
 
         if counter%6 == 0:
             pdfPage = page(canvas(), paperformat = paperformat.A4,centered=0)
@@ -120,16 +122,19 @@ def backup():
 
         pdfPage.canvas.insert(bitmap(**pdfImagePlacement(counter), image = qrCode.convert("LA")))
 
-        #Currently only used for debugging
-        qrCode.save(str(counter) + ".bmp")
+        if args.makeBmp:
+            qrCode.save("chunk" + str(counter) + ".bmp")
 
         counter += 1
 
+    print("Writing to pdf...")
     outFile = Path(args.output)
     if(outFile.suffix == ".pdf"):
         pdf.writePDFfile(args.output)
     else: 
         pdf.writePDFfile(args.output + ".pdf")
+
+    print("Done")
     
 def restore():
     b85ContentRestored = ""
@@ -179,7 +184,7 @@ def restore():
         if (index > lastIndex + 1):
             error("Chunk " + str(lastIndex + 1) + " is missing. Shutting down")
             exit()
-        if (index < lastIndex + 1):
+        if (index == lastIndex):
             if(lastChunkData == b85ChunkData):
                 print("Chunk " + str(index) + " has a duplicate with identical payload")
                 continue
@@ -199,6 +204,8 @@ def restore():
     tar.close()
     memTar.close()
 
+    print("Done")
+
 def main():
     if (args.mode == "backup"):
         backup()
@@ -211,18 +218,32 @@ if __name__ == "__main__":
     modeGroup = parser.add_mutually_exclusive_group()
     modeGroup.required = True
     modeGroup.add_argument("--backup", action="store_const", dest="mode", const="backup")
-    modeGroup.add_argument("--restore",action="store_const", dest="mode", const="restore")
+    modeGroup.add_argument("--restore", action="store_const", dest="mode", const="restore")
 
     parser.add_argument("-i", dest="input", required=True)
     parser.add_argument("-o", dest="output", required=True)
     parser.add_argument("-q", dest="qrSize", type=int)
+    parser.add_argument("-b", action="store_const", dest="makeBmp", const=True)
+    parser.add_argument("-p", action="store_const", dest="plainChunk", const=True)
 
     args = parser.parse_args()
 
     if args.qrSize is not None and args.mode == "restore":
         parser.error("Argument -q in restore mode given, will be ignored")
+    
+    if args.makeBmp is not None and args.mode == "restore":
+        parser.error("Argument -b in restore mode given, will be ignored")
+    
+    if args.plainChunk is not None and args.mode == "restore":
+        parser.error("Argument -p in restore mode given, will be ignored")
 
     if not args.qrSize:
         args.qrSize = 80
+    
+    if not args.makeBmp:
+        args.makeBmp = False
+
+    if not args.plainChunk:
+        args.plainChunk = False
 
     main()
