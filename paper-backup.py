@@ -176,6 +176,10 @@ def restore():
         print("Found a total of " + str(endChunkIndex+1) + " chunks")
 
     b85ChunkBuffer.sort(key = lambda x: x[0])
+
+    if b85ChunkBuffer[-1][0] != endChunkIndex:
+        error("Last chunk not an end chunk. Shutting down")
+        exit()
     
     #Check if b85ChunkBuffer makes sense
     lastIndex = -1
