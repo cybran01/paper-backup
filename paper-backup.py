@@ -147,10 +147,10 @@ def restore():
                     curFileSuffix = Path(curFile).suffix
                     if curFileSuffix == ".chunk":
                         f = open(curFile, "r")
-                        isEndChunk, chunkIndex, b85chunkData = getChunkData(f.read())
+                        isEndChunk, chunkIndex, b85ChunkData = getChunkData(f.read())
                         f.close()
                         print("Found a chunk file containing chunk " + str(chunkIndex) + ", extracting...")
-                        b85ChunkBuffer.append((chunkIndex,b85chunkData))
+                        b85ChunkBuffer.append((chunkIndex,b85ChunkData))
                         if isEndChunk:
                             endChunkIndex = chunkIndex
 
@@ -158,8 +158,8 @@ def restore():
         print("Decoding " + str(nr+1) + " of " + str(len(allImgs)) + " images...")
         for decodedQRChunk in QRdecode(file):
             decodedQRChunk = decodedQRChunk.decode("UTF-8")
-            isEndChunk, chunkIndex, b85chunkData = getChunkData(decodedQRChunk)
-            b85ChunkBuffer.append((chunkIndex,b85chunkData))
+            isEndChunk, chunkIndex, b85ChunkData = getChunkData(decodedQRChunk)
+            b85ChunkBuffer.append((chunkIndex,b85ChunkData))
             if isEndChunk:
                 endChunkIndex = chunkIndex
 
@@ -173,16 +173,22 @@ def restore():
     b85ChunkBuffer.sort(key = lambda x: x[0])
     
     #Check if b85ChunkBuffer makes sense
-    lastindex = -1
-    for index, b85chunkData in b85ChunkBuffer:
-        if (index > lastindex + 1):
-            error("Chunk " + str(lastindex + 1) + " is missing. Shutting down")
+    lastIndex = -1
+    lastChunkData = None
+    for index, b85ChunkData in b85ChunkBuffer:
+        if (index > lastIndex + 1):
+            error("Chunk " + str(lastIndex + 1) + " is missing. Shutting down")
             exit()
-        if (index < lastindex + 1):
-            error("Chunk " + str(index) + " is a duplicate. Shutting down")
-            exit()
-        lastindex = index
-        b85ContentRestored += b85chunkData
+        if (index < lastIndex + 1):
+            if(lastChunkData == b85ChunkData):
+                print("Chunk " + str(index) + " has a duplicate with identical payload")
+                continue
+            else:
+                print("Chunk " + str(index) + " has a duplicate with different payload. Shutting down")
+                exit()
+        lastIndex = index
+        lastChunkData = b85ChunkData
+        b85ContentRestored += b85ChunkData
 
     restored = b85decode(b85ContentRestored)
     restored = decompress(restored)
@@ -196,7 +202,7 @@ def restore():
 def main():
     if (args.mode == "backup"):
         backup()
-    else:
+    elif (args.mode == "restore"):
         restore()
     
 
