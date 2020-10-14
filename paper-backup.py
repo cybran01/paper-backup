@@ -107,7 +107,7 @@ def backup():
         if b85Content is None:
             chunk = chunk[:chunk.index(">")] + "<" + chunk[chunk.index(">")+1:] #Signal last chunk
 
-        print("Generating QRCode for chunk " + str(counter))
+        print("Generating QRCode for chunk " + str(counter) + ", " + (str(len(b85Content)) if b85Content else "0") + " bytes remaining")
         qrCode = QRencode(chunk)
 
         #Used for debugging
